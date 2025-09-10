@@ -1,17 +1,42 @@
+// frontend/next.config.ts
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // keep the build from failing on lint/TS while deploying
   eslint: { ignoreDuringBuilds: true },
   typescript: { ignoreBuildErrors: true },
 
-  // 🔑 Force-include the Keeta SDK for the keeta API route
   outputFileTracingIncludes: {
-    // path is the route file without the extension
     "/src/app/api/keeta/route": [
       "node_modules/@keetanetwork/keetanet-client/**",
-      ".pnpm/**/node_modules/@keetanetwork/keetanet-client/**"
+      ".pnpm/**/node_modules/@keetanetwork/keetanet-client/**",
     ],
+  },
+
+  experimental: {
+    turbo: {
+      resolveAlias: {
+        "@keetanetwork/asn1-napi-rs": "false",
+        "utf-8-validate": "false",
+        bufferutil: "false",
+      },
+    },
+  },
+
+  webpack: (config) => {
+    config.resolve = config.resolve || {};
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      "@keetanetwork/asn1-napi-rs": false as unknown as string,
+      "utf-8-validate": false as unknown as string,
+      bufferutil: false as unknown as string,
+    };
+    config.resolve.fallback = {
+      ...(config.resolve.fallback || {}),
+      "@keetanetwork/asn1-napi-rs": false as unknown as string,
+      "utf-8-validate": false as unknown as string,
+      bufferutil: false as unknown as string,
+    };
+    return config;
   },
 };
 
