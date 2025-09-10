@@ -4,7 +4,6 @@
   "outputDirectory": ".next",
   "functions": {
     "app/**": {
-      "runtime": "nodejs20.x",
       "includeFiles": "{node_modules/@keetanetwork/keetanet-client/**,node_modules/@keetanetwork/asn1-napi-rs/**}"
     }
   }
