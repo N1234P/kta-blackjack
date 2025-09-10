@@ -6,16 +6,35 @@ import { useKeeta } from "../../keeta/KeetaContext";
 const BASE_TOKEN_ID =
   "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
 
-export default function AccountPage() {
-  const { connected, address, connectFromSeed, getBalance, send, disconnect } = useKeeta();
+// ---- balance wire + helpers (same idea as header) ----
+type BalanceResult = {
+  balance?: number;                 // human (preferred)
+  balanceRaw?: string | number;     // raw base units (fallback)
+  decimals?: number;                // usually 9
+};
 
-  // import form
+function humanFromRaw(raw: string | number | bigint, decimals = 9): number {
+  let n: bigint;
+  if (typeof raw === "bigint") n = raw;
+  else if (typeof raw === "number") n = BigInt(Math.trunc(raw));
+  else n = BigInt(raw);
+  const base = 10n ** BigInt(decimals);
+  const whole = n / base;
+  const frac = n % base;
+  const fracStrFull = (frac + base).toString().slice(1).padStart(Number(decimals), "0");
+  return Number(`${whole}.${fracStrFull}`);
+}
+
+export default function AccountPage() {
+  const { connected, address, connectFromSeed, getBalance, send, disconnect, createWallet } = useKeeta();
+
+  // import / create
   const [seed, setSeed] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  // balance
-  const [balance, setBalance] = useState<string | number | bigint | null>(null);
+  // balance (store HUMAN number or null)
+  const [balance, setBalance] = useState<number | null>(null);
 
   // send form
   const [destination, setDestination] = useState("");
@@ -42,11 +61,26 @@ export default function AccountPage() {
     });
   }
 
+  async function handleCreateWallet() {
+    await wrap(async () => {
+      await createWallet();
+      setNote("New wallet created and connected.");
+    });
+  }
+
   async function handleGetBalance() {
     await wrap(async () => {
-      const res = await getBalance({ token: BASE_TOKEN_ID });
-      setBalance(res.balance);
-      setNote("Balance fetched.");
+      const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceResult;
+
+      const human =
+        typeof res?.balance === "number"
+          ? res.balance
+          : res?.balanceRaw != null
+          ? humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9)
+          : null;
+
+      setBalance(human);
+      setNote(human != null ? "Balance fetched." : "Balance unavailable.");
     });
   }
 
@@ -54,7 +88,7 @@ export default function AccountPage() {
     await wrap(async () => {
       const res = await send({ destination, amount: Number(amount) });
       setLastTx(res?.tx ?? res);
-      setNote("Transaction submitted (demo response).");
+      setNote("Transaction submitted.");
     });
   }
 
@@ -62,7 +96,7 @@ export default function AccountPage() {
     <section className="space-y-6">
       <h1 className="text-2xl font-semibold">Account / Connect Wallet</h1>
 
-      {/* Import existing wallet */}
+      {/* Connect / Create */}
       {!connected && (
         <div className="card p-4 space-y-3">
           <label className="text-sm text-[--color-muted]">Paste your mnemonic seed phrase</label>
@@ -73,7 +107,7 @@ export default function AccountPage() {
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
           />
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               className="btn btn-brand hover:opacity-90 disabled:opacity-50"
               disabled={!seed.trim() || busy}
@@ -90,6 +124,14 @@ export default function AccountPage() {
               }}
             >
               Clear
+            </button>
+            <button
+              className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50"
+              disabled={busy}
+              onClick={handleCreateWallet}
+              title="Generate a brand new testnet wallet"
+            >
+              Create New Wallet
             </button>
           </div>
           {note && (
@@ -138,7 +180,7 @@ export default function AccountPage() {
             </button>
             {balance !== null && (
               <div className="rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">
-                Balance: <span className="font-mono">{String(balance)}</span>
+                Balance: <span className="font-mono">{balance.toFixed(4).replace(/\.?0+$/, "")}</span>
               </div>
             )}
           </div>
@@ -169,7 +211,7 @@ export default function AccountPage() {
             </div>
             {lastTx && (
               <div className="rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm break-anywhere">
-                <div className="text-[--color-muted]">Last TX (demo response):</div>
+                <div className="text-[--color-muted]">Last TX (response):</div>
                 <pre className="whitespace-pre-wrap text-xs">
                   {JSON.stringify(lastTx, null, 2)}
                 </pre>

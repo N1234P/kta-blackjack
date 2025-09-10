@@ -7,29 +7,72 @@ export const dynamic = "force-dynamic";
 type Body =
   | { op: "address"; seed: string }
   | { op: "balance"; seed: string; address: string; token: string }
-  | { op: "send"; seed: string; destination: string; amount: number };
+  | { op: "send"; seed: string; destination: string; amount: number }
+  | { op: "payout"; to: string; amount: number };
 
 export async function POST(req: Request) {
   try {
-    const require = createRequire(import.meta.url);
-    const pkg = require("@keetanetwork/keetanet-client");
-    const { UserClient, lib: { Account } } = pkg;
-
     const body = (await req.json()) as Body;
 
-    // derive account from mnemonic seed phrase
-    const seed = body.seed.trim();
-    const account = Account.fromSeed(await Account.seedFromPassphrase(seed), 0);
-    const client = UserClient.fromNetwork("test", account);
+    const require = createRequire(import.meta.url);
+    const pkg = require("@keetanetwork/keetanet-client");
+    const {
+      UserClient,
+      lib: { Account },
+    } = pkg;
 
+    // ---------- server-signed payout (house -> player) ----------
+    if (body.op === "payout") {
+     
+      const HOUSE_SEED = process.env.HOUSE_SEED;
+     
+      if (!HOUSE_SEED) {
+        return NextResponse.json({ error: "HOUSE_SEED not configured" }, { status: 500 });
+      }
+
+      const { to, amount } = body;
+      if (!to?.startsWith("keeta_")) {
+        return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+      }
+
+      console.log("HERENEXT??");
+      const amtNum = Number(amount);
+      if (!Number.isFinite(amtNum) || amtNum <= 0) {
+        return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+      }
+      console.log(HOUSE_SEED);
+      // House signer
+      const house = Account.fromSeed(await Account.seedFromPassphrase(HOUSE_SEED), 0);
+      const client = UserClient.fromNetwork("test", house);
+      console.log(house);
+      console.log("AFTER HOUSE CREATION")
+
+      const toAccount = Account.fromPublicKeyString(to);
+      const decimals: number =
+        (client as any)?.baseToken?.decimals != null ? Number((client as any).baseToken.decimals) : 9;
+      const baseUnits = toBaseUnits(amtNum, decimals);
+
+      const builder = client.initBuilder();
+      builder.send(toAccount, baseUnits, client.baseToken);
+      // optional: await client.computeBuilderBlocks(builder);
+      await client.publishBuilder(builder);
+
+      return NextResponse.json({ success: true });
+    }
+
+    // For the remaining ops we do need the user's seed:
     if (body.op === "address") {
+      const seed = body.seed.trim();
+      const account = Account.fromSeed(await Account.seedFromPassphrase(seed), 0);
       return NextResponse.json({ address: account.publicKeyString.toString() });
     }
 
     if (body.op === "balance") {
-      const { address, token } = body;
-      const raw = await client.client.getBalance(address, token);
+      const { seed, address, token } = body;
+      const account = Account.fromSeed(await Account.seedFromPassphrase(seed.trim()), 0);
+      const client = UserClient.fromNetwork("test", account);
 
+      const raw = await client.client.getBalance(address, token);
       const rawBig = typeof raw === "bigint" ? raw : BigInt(raw);
       const human = Number(rawBig) / 1e9;
 
@@ -38,12 +81,11 @@ export async function POST(req: Request) {
         balance: human,                // human readable (div 1e9)
         decimals: 9,
       });
-}
-
-
+    }
 
     if (body.op === "send") {
-      const { destination, amount } = body;
+      const { seed, destination, amount } = body;
+
       if (!destination?.startsWith("keeta_")) {
         return NextResponse.json({ error: "Destination must be a keeta_ address" }, { status: 400 });
       }
@@ -52,26 +94,23 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
       }
 
-      // new SDK flow
-      const toAccount = Account.fromPublicKeyString(destination);
+      const account = Account.fromSeed(await Account.seedFromPassphrase(seed.trim()), 0);
+      const client = UserClient.fromNetwork("test", account);
 
-      // detect decimals if exposed; default to 9 for KTA
+      const toAccount = Account.fromPublicKeyString(destination);
       const decimals: number =
         (client as any)?.baseToken?.decimals != null ? Number((client as any).baseToken.decimals) : 9;
-
       const baseUnits = toBaseUnits(amtNum, decimals); // e.g. 2 -> 2000000000n when decimals=9
 
       const builder = client.initBuilder();
       builder.send(toAccount, baseUnits, client.baseToken);
 
-      // optional but useful for debugging
-      const computed = await client.computeBuilderBlocks(builder);
+      // optional: useful for debugging:
+      // const computed = await client.computeBuilderBlocks(builder);
 
-      const tx = await client.publishBuilder(builder);
+      await client.publishBuilder(builder);
 
-      
-
-// ✅ minimal response
+      // minimal JSON (no BigInt)
       return NextResponse.json({ success: true });
     }
 
@@ -82,26 +121,10 @@ export async function POST(req: Request) {
   }
 }
 
+/** Convert human amount (e.g. 2.5) into base units BigInt (decimals default 9) */
 function toBaseUnits(amountHuman: number, decimals = 9): bigint {
-  // Avoid FP drift by string math
   const s = String(amountHuman);
   const [whole, fracRaw = ""] = s.split(".");
   const frac = (fracRaw + "0".repeat(decimals)).slice(0, decimals); // pad/truncate
-  return BigInt(whole) * (10n ** BigInt(decimals)) + BigInt(frac || "0");
+  return BigInt(whole || "0") * (10n ** BigInt(decimals)) + BigInt(frac || "0");
 }
-
-// utils/serializeBigInt.ts
-export function serializeBigInt<T>(val: T): T {
-  if (typeof val === "bigint") return (val.toString() as unknown) as T;
-  if (Array.isArray(val)) return (val.map(serializeBigInt) as unknown) as T;
-  if (val && typeof val === "object") {
-    return Object.fromEntries(
-      Object.entries(val as Record<string, unknown>).map(([k, v]) => [k, serializeBigInt(v)])
-    ) as unknown as T;
-  }
-  return val;
-}
-
-
-
-

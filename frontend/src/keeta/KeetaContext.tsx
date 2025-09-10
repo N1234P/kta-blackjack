@@ -1,14 +1,16 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useContext, useMemo, useState } from "react";
 
 type BalanceResult = {
-  balance: string | number | bigint;
+  balance?: number;                 // human (preferred)
+  balanceRaw?: string | number;     // raw base units (fallback)
+  decimals?: number;                // usually 9
 };
 
 export type KeetaSession = {
-  seed: string;      // mnemonic seed phrase (kept in memory; persisted for demo)
-  address: string;   // derived public address
+  seed: string;    // mnemonic seed phrase (kept in memory + demo localStorage)
+  address: string; // derived public address
 };
 
 type KeetaContextValue = {
@@ -16,50 +18,33 @@ type KeetaContextValue = {
   address: string | null;
   session: KeetaSession | null;
 
-  /** last known raw balance (as returned by API) */
-  cachedBalance: string | number | bigint | null;
-
-  /** Import existing wallet (mnemonic seed phrase) and derive address */
   connectFromSeed: (seedPhrase: string) => Promise<void>;
-
-  /** Clear in-memory seed/address and local cache */
+  createWallet: () => Promise<void>;
   disconnect: () => void;
 
-  /** Get balance for an address+token (defaults to current address) */
-  getBalance: (opts?: { address?: string; token: string }) => Promise<BalanceResult>;
-
-  /** Send amount (number) of base token to destination */
+  getBalance: (opts: { address?: string; token: string }) => Promise<BalanceResult>;
   send: (params: { destination: string; amount: number }) => Promise<{ tx: unknown }>;
+  housePayout: (params: { to: string; amount: number }) => Promise<{ success: boolean }>;
 };
 
 const KeetaCtx = createContext<KeetaContextValue | null>(null);
 
-const LS_SESSION_KEY = "keeta.session.v1";
-const LS_BALANCE_KEY = "keeta.lastBalance.v1";
-
 export function KeetaProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<KeetaSession | null>(null);
-  const [cachedBalance, setCachedBalance] = useState<string | number | bigint | null>(null);
 
-  // --- hydrate from localStorage on first load
-  useEffect(() => {
+  // demo persistence (safe-ish for testnet only)
+  React.useEffect(() => {
     try {
-      const raw = localStorage.getItem(LS_SESSION_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as KeetaSession;
-        if (parsed?.seed && parsed?.address) {
-          setSession(parsed);
-        }
-      }
-      const b = localStorage.getItem(LS_BALANCE_KEY);
-      if (b) {
-        // balance might be larger than Number; keep as string
-        setCachedBalance(JSON.parse(b));
-      }
-    } catch {
-      // ignore
-    }
+      const raw = localStorage.getItem("keeta.session");
+      if (raw) setSession(JSON.parse(raw));
+    } catch {}
   }, []);
+  React.useEffect(() => {
+    try {
+      if (session) localStorage.setItem("keeta.session", JSON.stringify(session));
+      else localStorage.removeItem("keeta.session");
+    } catch {}
+  }, [session]);
 
   const connected = !!session;
   const address = session?.address ?? null;
@@ -67,7 +52,6 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
   async function connectFromSeed(seedPhrase: string) {
     const seed = seedPhrase.trim();
     if (!seed) throw new Error("Please paste your mnemonic seed phrase.");
-
     const r = await fetch("/api/keeta", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -78,26 +62,32 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
       throw new Error(err?.error ?? "Failed to derive address");
     }
     const { address } = await r.json();
-    const next: KeetaSession = { seed, address };
-    setSession(next);
-    // persist for refresh survival (demo)
-    localStorage.setItem(LS_SESSION_KEY, JSON.stringify(next));
+    setSession({ seed, address });
+  }
+
+  async function createWallet() {
+    const r = await fetch("/api/keeta", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "create" }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err?.error ?? "Failed to create wallet");
+    }
+    const { seed, address } = await r.json();
+    setSession({ seed, address });
   }
 
   function disconnect() {
     setSession(null);
-    setCachedBalance(null);
-    try {
-      localStorage.removeItem(LS_SESSION_KEY);
-      localStorage.removeItem(LS_BALANCE_KEY);
-    } catch {}
   }
 
-  async function getBalance(opts?: { address?: string; token: string }) {
+  async function getBalance(opts: { address?: string; token: string }) {
     if (!session && !opts?.address) {
       throw new Error("Not connected. Provide an address or connect first.");
     }
-    const selAddress = (opts?.address ?? session?.address) as string;
+    const addr = (opts?.address ?? session?.address) as string;
     const token = opts?.token;
     if (!token) throw new Error("Missing token id (e.g., keeta_...)");
 
@@ -106,8 +96,8 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         op: "balance",
-        seed: session?.seed ?? "", // your server currently needs seed to init client
-        address: selAddress,
+        seed: session?.seed ?? "",
+        address: addr,
         token,
       }),
     });
@@ -115,15 +105,7 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
       const err = await r.json().catch(() => ({}));
       throw new Error(err?.error ?? "Failed to fetch balance");
     }
-    const res = (await r.json()) as BalanceResult;
-
-    // cache last balance for instant header display on refresh
-    setCachedBalance(res.balance);
-    try {
-      localStorage.setItem(LS_BALANCE_KEY, JSON.stringify(res.balance));
-    } catch {}
-
-    return res;
+    return (await r.json()) as BalanceResult;
   }
 
   async function send(params: { destination: string; amount: number }) {
@@ -131,7 +113,7 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
     const { destination, amount } = params;
     if (!destination?.trim()) throw new Error("Destination required");
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
-    console.log(amount, "HERE???");
+
     const r = await fetch("/api/keeta", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -147,7 +129,24 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
       throw new Error(err?.error ?? "Send failed");
     }
     const data = await r.json();
+    // works with { success:true } or any tx payload
     return { tx: data.tx ?? data };
+  }
+
+  async function housePayout(params: { to: string; amount: number }) {
+    const { to, amount } = params;
+    const r = await fetch("/api/keeta", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "payout", to, amount }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      console.log(err);
+      throw new Error(err?.error ?? "Payout failed");
+    }
+    const data = await r.json();
+    return { success: !!data?.success };
   }
 
   const value = useMemo<KeetaContextValue>(
@@ -155,13 +154,14 @@ export function KeetaProvider({ children }: { children: React.ReactNode }) {
       connected,
       address,
       session,
-      cachedBalance,
       connectFromSeed,
+      createWallet,
       disconnect,
       getBalance,
       send,
+      housePayout,
     }),
-    [connected, address, session, cachedBalance]
+    [connected, address, session]
   );
 
   return <KeetaCtx.Provider value={value}>{children}</KeetaCtx.Provider>;

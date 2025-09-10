@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useKeeta } from "../keeta/KeetaContext"; // adjust path if needed
+import { useKeeta } from "../keeta/KeetaContext";
 
 const links = [
   { href: "/", label: "Home" },
@@ -11,38 +11,33 @@ const links = [
   { href: "/account", label: "Account" },
 ];
 
-const BASE_TOKEN_ID =
-  "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
+const BASE_TOKEN_ID = "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
 
-// 👇 Set this to true if your API returns RAW base units (e.g., 30000000000 for 30 KTA)
-// Set to false if your API already returns HUMAN units (e.g., 30 for 30 KTA)
-const BALANCE_IS_RAW = false;
+/** Balance wire shape coming back from /api/keeta */
+type BalanceResult = {
+  balance?: number;                 // human (preferred)
+  balanceRaw?: string | number;     // raw base units (fallback)
+  decimals?: number;                // usually 9
+};
 
-// Format human number (string/number) with up to dp decimals
-function fmtHuman(x: string | number | bigint, dp = 4) {
-  if (typeof x === "bigint") return x.toString();
-  const n = typeof x === "number" ? x : Number(x);
-  if (!Number.isFinite(n)) return String(x);
-  const s = n.toFixed(dp);
-  return s.replace(/\.?0+$/, ""); // trim trailing zeros
-}
-
-// Convert RAW base-units (BigInt/string/number) with 9 decimals → human string
-function fmtFromRaw(raw: string | number | bigint, decimals = 9, dp = 4) {
+/** Convert raw base units → human number with <decimals> */
+function humanFromRaw(raw: string | number | bigint, decimals = 9): number {
   let n: bigint;
   if (typeof raw === "bigint") n = raw;
   else if (typeof raw === "number") n = BigInt(Math.trunc(raw));
   else n = BigInt(raw);
-
-  const base = BigInt(10) ** BigInt(decimals);
+  const base = 10n ** BigInt(decimals);
   const whole = n / base;
   const frac = n % base;
-
-
-
   const fracStrFull = (frac + base).toString().slice(1).padStart(Number(decimals), "0");
-  const fracShown = fracStrFull.slice(0, dp).replace(/0+$/, "");
-  return fracShown ? `${whole.toString()}.${fracShown}` : whole.toString();
+  return Number(`${whole}.${fracStrFull}`);
+}
+
+/** Format a human number nicely, trimming trailing zeros */
+function fmtHuman(x: number, dp = 4) {
+  if (!Number.isFinite(x)) return String(x);
+  const s = x.toFixed(dp);
+  return s.replace(/\.?0+$/, "");
 }
 
 export default function Header() {
@@ -50,30 +45,38 @@ export default function Header() {
   const router = useRouter();
   const { connected, address, getBalance } = useKeeta();
 
-  const [rawBalance, setRawBalance] = useState<string | number | bigint | null>(null);
+  // store a HUMAN number or null; never undefined
+  const [humanBalance, setHumanBalance] = useState<number | null>(null);
   const fetchingRef = useRef(false);
 
   const display = useMemo(() => {
-    if (rawBalance == null) return "— KTA";
-    return BALANCE_IS_RAW ? `${fmtFromRaw(rawBalance)} KTA` : `${fmtHuman(rawBalance)} KTA`;
-  }, [rawBalance]);
+    return humanBalance == null ? "— KTA" : `${fmtHuman(humanBalance, 4)} KTA`;
+  }, [humanBalance]);
 
   useEffect(() => {
     if (!connected) {
-      setRawBalance(null);
+      setHumanBalance(null);
       return;
     }
-
     let stopped = false;
 
     const refresh = async () => {
       if (fetchingRef.current) return;
       fetchingRef.current = true;
       try {
-        const res = await getBalance({ token: BASE_TOKEN_ID });
-        if (!stopped) setRawBalance(res.balance);
+        const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceResult;
+
+        // Prefer human 'balance'; otherwise derive from raw + decimals
+        const human =
+          typeof res?.balance === "number"
+            ? res.balance
+            : res?.balanceRaw != null
+            ? humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9)
+            : null;
+
+        if (!stopped) setHumanBalance(human);
       } catch {
-        // ignore for header
+        if (!stopped) setHumanBalance(null);
       } finally {
         fetchingRef.current = false;
       }
@@ -115,11 +118,12 @@ export default function Header() {
 
         {connected ? (
           <button
-            className="btn bg-white/10 hover:bg-brand/60 text-sm shrink-0 px-3 sm:px-4 font-mono"
+            className="shrink-0 inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 sm:px-4 py-1.5 text-xs sm:text-sm text-emerald-300 hover:bg-emerald-500/20 transition-colors"
             onClick={() => router.push("/account")}
             title={address ?? ""}
           >
-            {display}
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-mono">{display}</span>
           </button>
         ) : (
           <Link href="/account" className="btn btn-brand text-sm shrink-0 px-3 sm:px-4">

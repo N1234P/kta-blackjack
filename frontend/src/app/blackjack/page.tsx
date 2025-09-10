@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useKeeta } from "../../keeta/KeetaContext";
 
 /* ---------- Types ---------- */
 type Suit = "♠" | "♥" | "♦" | "♣";
@@ -18,54 +19,53 @@ function buildShoe(numDecks = 6): Card[] {
   const cards: Card[] = [];
   let uid = 0;
   for (let d = 0; d < numDecks; d++) {
-    for (const s of SUITS) {
-      for (const r of RANKS) {
-        cards.push({ rank: r, suit: s, id: `${d}-${r}${s}-${uid++}` });
-      }
-    }
+    for (const s of SUITS) for (const r of RANKS) cards.push({ rank: r, suit: s, id: `${d}-${r}${s}-${uid++}` });
   }
-  // Fisher–Yates shuffle
   for (let i = cards.length - 1; i > 0; i--) {
     const j = (Math.random() * (i + 1)) | 0;
     [cards[i], cards[j]] = [cards[j], cards[i]];
   }
   return cards;
 }
-
 function drawN<T>(n: number, from: T[]) {
   const taken = from.slice(-n);
   const rest = from.slice(0, from.length - n);
   return [taken, rest] as const;
 }
-
 function cardValue(rank: Rank): number {
   if (rank === "A") return 11;
   if (rank === "K" || rank === "Q" || rank === "J") return 10;
   return parseInt(rank, 10);
 }
-
 function handValue(hand: Card[]) {
-  let total = 0;
-  let aces = 0;
+  let total = 0, aces = 0;
   for (const c of hand) {
-    if (c.rank === "A") {
-      aces++;
-      total += 11;
-    } else {
-      total += cardValue(c.rank);
-    }
+    if (c.rank === "A") { aces++; total += 11; } else total += cardValue(c.rank);
   }
-  while (total > 21 && aces > 0) {
-    total -= 10; // count some Aces as 1
-    aces--;
-  }
+  while (total > 21 && aces > 0) { total -= 10; aces--; }
   const soft = hand.some((c) => c.rank === "A") && total <= 21 && aces > 0;
   return { total, soft };
 }
-
 function isBlackjack(hand: Card[]) {
   return hand.length === 2 && handValue(hand).total === 21;
 }
+
+/* ---------- Balance helpers ---------- */
+const BASE_TOKEN_ID = "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
+const HOUSE_ADDRESS = process.env.NEXT_PUBLIC_HOUSE_ADDRESS || "";
+
+function humanFromRaw(raw: string | number | bigint, decimals = 9) {
+  let n: bigint;
+  if (typeof raw === "bigint") n = raw;
+  else if (typeof raw === "number") n = BigInt(Math.trunc(raw));
+  else n = BigInt(raw);
+  const base = 10n ** BigInt(decimals);
+  const whole = n / base;
+  const frac = n % base;
+  const fracStrFull = (frac + base).toString().slice(1).padStart(Number(decimals), "0");
+  return Number(`${whole}.${fracStrFull}`);
+}
+type BalanceWire = { balance?: number; balanceRaw?: string | number; decimals?: number };
 
 /* ---------- Component ---------- */
 export default function BlackjackPage() {
@@ -75,28 +75,51 @@ export default function BlackjackPage() {
 
   // hands
   const [player, setPlayer] = useState<Card[]>([]);
-  const [dealer, setDealer] = useState<Card[]>([]); // visible dealer cards
-  const [dealerHole, setDealerHole] = useState<Card | null>(null); // hidden until reveal
+  const [dealer, setDealer] = useState<Card[]>([]);
+  const [dealerHole, setDealerHole] = useState<Card | null>(null);
 
   // flow
   const [phase, setPhase] = useState<Phase>("idle");
   const [outcome, setOutcome] = useState<Outcome>(null);
   const [message, setMessage] = useState("");
+  const [settling, setSettling] = useState(false);
 
   // chips
-  const [bet, setBet] = useState(0.25);   // base bet
-  const [balance, setBalance] = useState(10);
-  const [wager, setWager] = useState(0.25); // actual round wager (doubles when doubled)
+  const [bet, setBet] = useState(0.25);
+  const [balance, setBalance] = useState(0); // hydrated from wallet
+  const [wager, setWager] = useState(0.25);
   const [doubled, setDoubled] = useState(false);
 
-  // derived scores
+  // derived
   const playerScore = useMemo(() => handValue(player), [player]);
   const dealerScore = useMemo(() => handValue(dealer), [dealer]);
 
   // guards
   const dealerPlayedRef = useRef(false);
 
-  /* ----- Helpers ----- */
+  // wallet sync
+  const { connected, address, getBalance, send, housePayout } = useKeeta();
+  useEffect(() => {
+    let stop = false;
+    const load = async () => {
+      if (!connected) return;
+      try {
+        const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceWire;
+        let human: number | null = Number.isFinite(res?.balance as number) ? (res!.balance as number) : null;
+        if (human == null && res?.balanceRaw != null) {
+          human = humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9);
+        }
+        if (!stop && human != null) {
+          const roundIdle = phase === "idle" || phase === "over";
+          if (roundIdle) setBalance(human);
+        }
+      } catch {}
+    };
+    load();
+    return () => { stop = true; };
+  }, [connected, phase, getBalance]);
+
+  /* ----- helpers ----- */
   function reshuffleIfNeeded(deck: Card[]) {
     if (deck.length <= cutIndex) {
       const fresh = buildShoe(6);
@@ -105,7 +128,6 @@ export default function BlackjackPage() {
     }
     return deck;
   }
-
   function draw1(): [Card, Card[]] {
     let deck = reshuffleIfNeeded(shoe);
     const [cards, rest] = drawN(1, deck);
@@ -115,12 +137,8 @@ export default function BlackjackPage() {
 
   function startRound() {
     if (!(phase === "idle" || phase === "over")) return;
-    if (bet > balance) {
-      setMessage("Insufficient balance for this bet.");
-      return;
-    }
+    if (bet > balance) { setMessage("Insufficient balance for this bet."); return; }
 
-    // reset round state
     dealerPlayedRef.current = false;
     setOutcome(null);
     setMessage("");
@@ -129,17 +147,11 @@ export default function BlackjackPage() {
     setDealerHole(null);
     setDoubled(false);
 
-    // take initial bet
     setWager(bet);
     setBalance((b) => b - bet);
 
-    // deal P1, D up, P2, D hole (hole kept separate)
     let deck = reshuffleIfNeeded(shoe);
-    let draw = (n: number) => {
-      const [cards, rest] = drawN(n, deck);
-      deck = rest;
-      return cards;
-    };
+    let draw = (n: number) => { const [cards, rest] = drawN(n, deck); deck = rest; return cards; };
 
     const [p1] = draw(1);
     const [dUp] = draw(1);
@@ -152,11 +164,9 @@ export default function BlackjackPage() {
     setDealerHole(dHole);
     setPhase("player");
 
-    // immediate blackjack resolution
     const pBJ = isBlackjack([p1, p2]);
     const dBJ = isBlackjack([dUp, dHole]);
     if (pBJ || dBJ) {
-      // reveal hole for correct display
       setDealer([dUp, dHole]);
       setDealerHole(null);
       if (pBJ && dBJ) finishRound("push");
@@ -170,21 +180,16 @@ export default function BlackjackPage() {
     const [c] = draw1();
     const next = [...player, c];
     setPlayer(next);
-    if (handValue(next).total > 21) {
-      finishRound("dealer");
-    }
+    if (handValue(next).total > 21) finishRound("dealer");
   }
-
   function stand() {
     if (phase !== "player") return;
     setPhase("dealer");
     dealerRevealAndPlay();
   }
-
   function canDouble() {
     return phase === "player" && player.length === 2 && !doubled && bet <= balance;
   }
-
   function doubleDown() {
     if (!canDouble()) return;
     setBalance((b) => b - bet);
@@ -194,41 +199,31 @@ export default function BlackjackPage() {
     const [c] = draw1();
     const next = [...player, c];
     setPlayer(next);
-
-    if (handValue(next).total > 21) {
-      finishRound("dealer");
-    } else {
-      setPhase("dealer");
-      dealerRevealAndPlay();
-    }
+    if (handValue(next).total > 21) finishRound("dealer");
+    else { setPhase("dealer"); dealerRevealAndPlay(); }
   }
 
   function dealerRevealAndPlay() {
     if (dealerPlayedRef.current) return;
     dealerPlayedRef.current = true;
 
-    // reveal hole (no extra draw)
     setDealer((cur) => (dealerHole ? [...cur, dealerHole] : cur));
     setDealerHole(null);
 
-    // play out dealer to 17+ (stand on soft 17)
     setTimeout(() => {
       let deck = shoe.slice();
       let d = dealerHole ? [...dealer, dealerHole] : dealer.slice();
-
       const standOnSoft17 = true;
       while (true) {
         const { total, soft } = handValue(d);
         if (total > 21) break;
         if (total > 17) break;
         if (total === 17 && standOnSoft17) break;
-        // draw one
         deck = reshuffleIfNeeded(deck);
         const [take, rest] = drawN(1, deck);
         d = [...d, take[0]];
         deck = rest;
       }
-
       setShoe(deck);
       setDealer(d);
 
@@ -241,9 +236,11 @@ export default function BlackjackPage() {
     }, 200);
   }
 
-  function finishRound(winner: Outcome, blackjackPayout = 1) {
+  async function finishRound(winner: Outcome, blackjackPayout = 1) {
     setPhase("over");
     setOutcome(winner);
+
+    // local table balance
     if (winner === "player") {
       setBalance((b) => b + wager * (1 + blackjackPayout));
       setMessage(blackjackPayout === 1.5 ? "Blackjack! You win 3:2." : "You win!");
@@ -252,6 +249,29 @@ export default function BlackjackPage() {
       setMessage("Push.");
     } else {
       setMessage("Dealer wins.");
+    }
+
+    // on-chain settlement (best-effort)
+    if (!connected) return;
+
+    try {
+      setSettling(true);
+      if (winner === "dealer") {
+        if (!HOUSE_ADDRESS) throw new Error("House address not set");
+        // player → house (wager)
+        await send({ destination: HOUSE_ADDRESS, amount: wager });
+      } else if (winner === "player") {
+        if (!address) throw new Error("No player address");
+        // house → player (net winnings)
+        const netWin = blackjackPayout === 1.5 ? wager * 1.5 : wager;
+        await housePayout({ to: address, amount: netWin });
+      }
+      // push → no transfer
+    } catch (e) {
+      console.error("[settlement] error", e);
+      setMessage((m) => m + "  (Settlement error: see console)");
+    } finally {
+      setSettling(false);
     }
   }
 
@@ -263,7 +283,6 @@ export default function BlackjackPage() {
     setDealer([]);
     setDealerHole(null);
     setDoubled(false);
-    // keep shoe/bet/balance as-is
   }
 
   /* ----- UI helpers ----- */
@@ -275,7 +294,6 @@ export default function BlackjackPage() {
       </div>
     );
   }
-
   function CardView({ c, hidden = false }: { c: Card; hidden?: boolean }) {
     const isRed = c.suit === "♥" || c.suit === "♦";
     if (hidden) {
@@ -288,8 +306,7 @@ export default function BlackjackPage() {
     return (
       <div className="w-11 h-16 sm:w-12 sm:h-16 rounded-lg bg-white text-black border border-black/10 shadow grid place-items-center">
         <div className={`text-sm font-bold ${isRed ? "text-red-600" : "text-black"}`}>
-          {c.rank}
-          <span className="ml-0.5">{c.suit}</span>
+          {c.rank}<span className="ml-0.5">{c.suit}</span>
         </div>
       </div>
     );
@@ -313,17 +330,14 @@ export default function BlackjackPage() {
           </div>
         </div>
 
-        {/* Table + sidebar */}
+        {/* table + sidebar */}
         <div className="mt-5 grid gap-4 md:grid-cols-[1fr,320px]">
-          {/* Play area */}
           <div className="card p-4 min-w-0">
             {/* Dealer */}
             <div className="flex items-center justify-between">
               <div className="text-sm text-[--color-muted]">Dealer</div>
               {phase === "player" ? (
-                <div className="text-sm">
-                  Score: <span className="font-semibold">?</span>
-                </div>
+                <div className="text-sm">Score: <span className="font-semibold">?</span></div>
               ) : (
                 <Score total={dealerScore.total} soft={dealerScore.soft} />
               )}
@@ -333,10 +347,8 @@ export default function BlackjackPage() {
               {dealer.length === 0 && !dealerHole && (
                 <div className="h-16 grid place-items-center text-[--color-muted]">—</div>
               )}
-              {dealer.map((c) => (
-                <CardView key={c.id} c={c} />
-              ))}
-              {phase === "player" && dealerHole && <CardView key={dealerHole.id} c={dealerHole} hidden />}
+              {dealer.map((c) => (<CardView key={c.id} c={c} />))}
+              {phase === "player" && dealerHole && (<CardView key={dealerHole.id} c={dealerHole} hidden />)}
             </div>
 
             {/* Player */}
@@ -348,46 +360,33 @@ export default function BlackjackPage() {
               {player.length === 0 && (
                 <div className="h-16 grid place-items-center text-[--color-muted]">—</div>
               )}
-              {player.map((c) => (
-                <CardView key={c.id} c={c} />
-              ))}
+              {player.map((c) => (<CardView key={c.id} c={c} />))}
             </div>
 
             {/* Actions */}
             <div className="mt-6 flex flex-wrap gap-2">
               <button
-                className={`btn transition-colors ${
-                  canDeal ? "btn-brand hover:opacity-90" : "bg-white/10 text-zinc-500 cursor-not-allowed"
-                }`}
+                className={`btn transition-colors ${canDeal ? "btn-brand hover:opacity-90" : "bg-white/10 text-zinc-500 cursor-not-allowed"}`}
                 onClick={startRound}
                 disabled={!canDeal || bet <= 0 || balance < 0}
               >
                 Deal
               </button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>
-                Hit
-              </button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>
-                Stand
-              </button>
-              <button
-                className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50"
-                onClick={doubleDown}
-                disabled={!canDouble()}
-              >
-                Double
-              </button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>
-                New Round
-              </button>
+              <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>Hit</button>
+              <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>Stand</button>
+              <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
+              <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>New Round</button>
             </div>
 
             {message && (
-              <div className="mt-4 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">{message}</div>
+              <div className="mt-4 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">
+                {message}
+                {settling && <span className="ml-2 text-xs text-white/60">Settling…</span>}
+              </div>
             )}
           </div>
 
-          {/* Sidebar (chips) */}
+          {/* Sidebar */}
           <aside className="card p-4 space-y-4 min-w-0">
             <div>
               <div className="text-sm font-medium">Bet Size</div>
@@ -395,9 +394,7 @@ export default function BlackjackPage() {
                 {[0.1, 0.25, 0.5, 1].map((b) => (
                   <button
                     key={b}
-                    className={`btn text-sm ${
-                      bet === b ? "btn-brand hover:opacity-90" : "bg-white/10 hover:bg-brand/60"
-                    }`}
+                    className={`btn text-sm ${bet === b ? "btn-brand hover:opacity-90" : "bg-white/10 hover:bg-brand/60"}`}
                     onClick={() => setBet(b)}
                     disabled={!canDeal}
                   >
@@ -405,9 +402,7 @@ export default function BlackjackPage() {
                   </button>
                 ))}
               </div>
-              {!canDeal && (
-                <div className="mt-2 text-xs text-[--color-muted]">Bet locked. Finish the round to change it.</div>
-              )}
+              {!canDeal && <div className="mt-2 text-xs text-[--color-muted]">Bet locked. Finish the round to change it.</div>}
             </div>
 
             <div className="text-xs text-[--color-muted]">
