@@ -1,14 +1,11 @@
 {
   "framework": "nextjs",
-  "buildCommand": "cd frontend && pnpm approve-builds && pnpm build",
-  "outputDirectory": "frontend/.next",
+  "buildCommand": "pnpm approve-builds && pnpm build",
+  "outputDirectory": ".next",
   "functions": {
-    "app/api/**": {
+    "app/**": {
       "runtime": "nodejs20.x",
-      "includeFiles": [
-        "node_modules/@keetanetwork/keetanet-client/**",
-        "node_modules/@keetanetwork/asn1-napi-rs/**"
-      ]
+      "includeFiles": "{node_modules/@keetanetwork/keetanet-client/**,node_modules/@keetanetwork/asn1-napi-rs/**}"
     }
   }
 }
