@@ -4,7 +4,6 @@
   "outputDirectory": ".next",
   "functions": {
     "src/app/api/**": {
-      "externalNodeModules": ["@keetanetwork/keetanet-client"],
       "includeFiles": "node_modules/@keetanetwork/keetanet-client/**"
     }
   }
