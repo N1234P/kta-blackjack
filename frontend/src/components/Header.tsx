@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { useKeeta } from "../keeta/KeetaContext";
 
 const links = [
@@ -11,85 +11,23 @@ const links = [
   { href: "/account", label: "Account" },
 ];
 
-const BASE_TOKEN_ID = "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
+const SNIPPET_LEN = 8;
 
-/** Balance wire shape coming back from /api/keeta */
-type BalanceResult = {
-  balance?: number;                 // human (preferred)
-  balanceRaw?: string | number;     // raw base units (fallback)
-  decimals?: number;                // usually 9
-};
-
-/** Convert raw base units → human number with <decimals> */
-function humanFromRaw(raw: string | number | bigint, decimals = 9): number {
-  let n: bigint;
-  if (typeof raw === "bigint") n = raw;
-  else if (typeof raw === "number") n = BigInt(Math.trunc(raw));
-  else n = BigInt(raw);
-  const base = 10n ** BigInt(decimals);
-  const whole = n / base;
-  const frac = n % base;
-  const fracStrFull = (frac + base).toString().slice(1).padStart(Number(decimals), "0");
-  return Number(`${whole}.${fracStrFull}`);
-}
-
-/** Format a human number nicely, trimming trailing zeros */
-function fmtHuman(x: number, dp = 4) {
-  if (!Number.isFinite(x)) return String(x);
-  const s = x.toFixed(dp);
-  return s.replace(/\.?0+$/, "");
+/** Return first N chars of the address *after* the `keeta_` prefix */
+function addrSnippet(addr: string | null | undefined, n = SNIPPET_LEN): string {
+  if (!addr) return "";
+  const prefix = "keeta_";
+  const core = addr.startsWith(prefix) ? addr.slice(prefix.length) : addr;
+  const sliced = core.slice(0, n);
+  return `${sliced}${core.length > n ? "…" : ""}`;
 }
 
 export default function Header() {
   const pathname = usePathname();
   const router = useRouter();
-  const { connected, address, getBalance } = useKeeta();
+  const { connected, address } = useKeeta();
 
-  // store a HUMAN number or null; never undefined
-  const [humanBalance, setHumanBalance] = useState<number | null>(null);
-  const fetchingRef = useRef(false);
-
-  const display = useMemo(() => {
-    return humanBalance == null ? "— KTA" : `${fmtHuman(humanBalance, 4)} KTA`;
-  }, [humanBalance]);
-
-  useEffect(() => {
-    if (!connected) {
-      setHumanBalance(null);
-      return;
-    }
-    let stopped = false;
-
-    const refresh = async () => {
-      if (fetchingRef.current) return;
-      fetchingRef.current = true;
-      try {
-        const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceResult;
-
-        // Prefer human 'balance'; otherwise derive from raw + decimals
-        const human =
-          typeof res?.balance === "number"
-            ? res.balance
-            : res?.balanceRaw != null
-            ? humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9)
-            : null;
-
-        if (!stopped) setHumanBalance(human);
-      } catch {
-        if (!stopped) setHumanBalance(null);
-      } finally {
-        fetchingRef.current = false;
-      }
-    };
-
-    // initial + periodic refresh
-    refresh();
-    const id = setInterval(refresh, 20000);
-    return () => {
-      stopped = true;
-      clearInterval(id);
-    };
-  }, [connected, pathname, getBalance]);
+  const display = useMemo(() => addrSnippet(address), [address]);
 
   return (
     <header className="sticky top-0 z-40 border-b border-[--color-border] backdrop-blur bg-black/40">
@@ -116,11 +54,11 @@ export default function Header() {
           </div>
         </nav>
 
-        {connected ? (
+        {connected && address ? (
           <button
             className="shrink-0 inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 sm:px-4 py-1.5 text-xs sm:text-sm text-emerald-300 hover:bg-emerald-500/20 transition-colors"
             onClick={() => router.push("/account")}
-            title={address ?? ""}
+            title={address}
           >
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span className="font-mono">{display}</span>

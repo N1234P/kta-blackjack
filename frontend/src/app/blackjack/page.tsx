@@ -21,7 +21,7 @@ function buildShoe(numDecks = 6): Card[] {
   for (let d = 0; d < numDecks; d++) {
     for (const s of SUITS) for (const r of RANKS) cards.push({ rank: r, suit: s, id: `${d}-${r}${s}-${uid++}` });
   }
-  // Fisher–Yates shuffle
+  // Fisher–Yates
   for (let i = cards.length - 1; i > 0; i--) {
     const j = (Math.random() * (i + 1)) | 0;
     [cards[i], cards[j]] = [cards[j], cards[i]];
@@ -44,7 +44,7 @@ function handValue(hand: Card[]) {
     if (c.rank === "A") { aces++; total += 11; } else total += cardValue(c.rank);
   }
   while (total > 21 && aces > 0) { total -= 10; aces--; }
-  // "soft" if there's at least one Ace currently counted as 11
+  // soft if at least one Ace still counted as 11 (i.e., we had >0 aces before reducing)
   const soft = hand.some((c) => c.rank === "A") && total <= 21 && aces > 0;
   return { total, soft };
 }
@@ -55,6 +55,8 @@ function isBlackjack(hand: Card[]) {
 /* ---------- Balance helpers ---------- */
 const BASE_TOKEN_ID = "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
 const HOUSE_ADDRESS = process.env.NEXT_PUBLIC_HOUSE_ADDRESS || "";
+
+type BalanceWire = { balance?: number; balanceRaw?: string | number; decimals?: number };
 
 function humanFromRaw(raw: string | number | bigint, decimals = 9) {
   let n: bigint;
@@ -67,7 +69,6 @@ function humanFromRaw(raw: string | number | bigint, decimals = 9) {
   const fracStrFull = (frac + base).toString().slice(1).padStart(Number(decimals), "0");
   return Number(`${whole}.${fracStrFull}`);
 }
-type BalanceWire = { balance?: number; balanceRaw?: string | number; decimals?: number };
 
 /* ---------- Component ---------- */
 export default function BlackjackPage() {
@@ -88,9 +89,11 @@ export default function BlackjackPage() {
 
   // chips
   const [bet, setBet] = useState(0.25);
-  const [balance, setBalance] = useState(0); // hydrated from wallet
   const [wager, setWager] = useState(0.25);
   const [doubled, setDoubled] = useState(false);
+
+  // wallet balance shown on page
+  const [balance, setBalance] = useState(0);
 
   // derived
   const playerScore = useMemo(() => handValue(player), [player]);
@@ -99,45 +102,48 @@ export default function BlackjackPage() {
   // guards
   const dealerPlayedRef = useRef(false);
 
-  // ---- NEW: live refs to avoid stale-closure bugs (esp. after Double) ----
+  // live refs to avoid stale-state bugs (esp. after Double)
   const playerRef = useRef<Card[]>(player);
   const dealerRef = useRef<Card[]>(dealer);
   const dealerHoleRef = useRef<Card | null>(dealerHole);
   const shoeRef = useRef<Card[]>(shoe);
-
   useEffect(() => { playerRef.current = player; }, [player]);
   useEffect(() => { dealerRef.current = dealer; }, [dealer]);
   useEffect(() => { dealerHoleRef.current = dealerHole; }, [dealerHole]);
   useEffect(() => { shoeRef.current = shoe; }, [shoe]);
 
-  // wallet sync
+  // wallet API
   const { connected, address, getBalance, send, housePayout } = useKeeta();
+
+  // seed balance when connected
   useEffect(() => {
+    if (!connected) return;
     let stop = false;
-    const load = async () => {
-      if (!connected) return;
-      try {
-        const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceWire;
-        let human: number | null = Number.isFinite(res?.balance as number) ? (res!.balance as number) : null;
-        if (human == null && res?.balanceRaw != null) {
-          human = humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9);
-        }
-        if (!stop && human != null) {
-          const roundIdle = phase === "idle" || phase === "over";
-          if (roundIdle) setBalance(human);
-        }
-      } catch {}
-    };
-    load();
+    (async () => {
+      const b = await fetchWalletBalance();
+      if (!stop) setBalance(b);
+    })();
     return () => { stop = true; };
-  }, [connected, phase, getBalance]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected]);
+
+  async function fetchWalletBalance(): Promise<number> {
+    try {
+      const res = (await getBalance({ token: BASE_TOKEN_ID })) as BalanceWire;
+      if (Number.isFinite(res?.balance as number)) return res!.balance as number;
+      if (res?.balanceRaw != null) {
+        return humanFromRaw(res.balanceRaw, typeof res.decimals === "number" ? res.decimals : 9);
+      }
+    } catch {}
+    return 0;
+  }
 
   /* ----- helpers ----- */
   function reshuffleIfNeeded(deck: Card[]) {
     if (deck.length <= cutIndex) {
       const fresh = buildShoe(6);
       setCutIndex(Math.floor(fresh.length * 0.2));
-      shoeRef.current = fresh; // keep ref hot
+      shoeRef.current = fresh;
       return fresh;
     }
     return deck;
@@ -146,13 +152,19 @@ export default function BlackjackPage() {
     let deck = reshuffleIfNeeded(shoeRef.current);
     const [cards, rest] = drawN(1, deck);
     setShoe(rest);
-    shoeRef.current = rest; // keep ref hot
+    shoeRef.current = rest;
     return [cards[0], rest];
   }
 
-  function startRound() {
+  // ---- Round flow ----
+  async function startRound() {
     if (!(phase === "idle" || phase === "over")) return;
-    if (bet > balance) { setMessage("Insufficient balance for this bet."); return; }
+
+    // refresh wallet at round start so page shows the real live balance
+    const bank = await fetchWalletBalance();
+    setBalance(bank);
+
+    if (bet > bank) { setMessage("Insufficient balance for this bet."); return; }
 
     dealerPlayedRef.current = false;
     setOutcome(null);
@@ -163,7 +175,6 @@ export default function BlackjackPage() {
     setDoubled(false);
 
     setWager(bet);
-    setBalance((b) => b - bet);
 
     let deck = reshuffleIfNeeded(shoeRef.current);
     let draw = (n: number) => { const [cards, rest] = drawN(n, deck); deck = rest; return cards; };
@@ -207,19 +218,17 @@ export default function BlackjackPage() {
   function stand() {
     if (phase !== "player") return;
     setPhase("dealer");
-    dealerRevealAndPlay();
+    dealerRevealAndPlay(true); // sync for snappy finish
   }
 
-  // safer double guard for floats
-function canDouble() {
-  const EPS = 1e-9;
-  return phase === "player" && player.length === 2 && !doubled && (balance + EPS) >= bet;
-}
-
+  // Double guard: only two cards, haven't doubled, enough balance to cover full doubled wager (2 * bet)
+  function canDouble() {
+    const EPS = 1e-9;
+    return phase === "player" && player.length === 2 && !doubled && (balance + EPS) >= (bet * 2);
+  }
 
   function doubleDown() {
     if (!canDouble()) return;
-    setBalance((b) => b - bet);
     setWager((w) => w + bet);
     setDoubled(true);
 
@@ -229,18 +238,17 @@ function canDouble() {
     playerRef.current = next;
 
     if (handValue(next).total > 21) {
-      finishRound("dealer");              // bust after double
+      finishRound("dealer");
     } else {
       setPhase("dealer");
       dealerRevealAndPlay(true);
     }
   }
 
-  function dealerRevealAndPlay(immediate=false) {
+  function dealerRevealAndPlay(immediate = false) {
     if (dealerPlayedRef.current) return;
     dealerPlayedRef.current = true;
 
-    // reveal hole from live ref
     const hole = dealerHoleRef.current;
     if (hole) {
       const revealed = [...dealerRef.current, hole];
@@ -259,8 +267,8 @@ function canDouble() {
         const { total, soft } = handValue(d);
         if (total > 17) break;
         if (total === 17) {
-          if (soft && standOnSoft17) break; // stand soft-17
-          if (!soft) break;                  // stand hard-17
+          if (soft && standOnSoft17) break; // stand on soft 17
+          if (!soft) break;                  // stand on hard 17
         }
         deck = reshuffleIfNeeded(deck);
         const [take, rest] = drawN(1, deck);
@@ -268,7 +276,6 @@ function canDouble() {
         deck = rest;
       }
 
-      // commit end state
       setShoe(deck);           shoeRef.current = deck;
       setDealer(d);            dealerRef.current = d;
 
@@ -280,47 +287,42 @@ function canDouble() {
       else finishRound("push");
     };
 
-    // keep the tiny delay for normal play if you like the animation feel
     if (immediate) run();
     else setTimeout(run, 200);
-}
+  }
 
   async function finishRound(winner: Outcome, blackjackPayout = 1) {
     setPhase("over");
     setOutcome(winner);
 
-    // local table balance
     if (winner === "player") {
-      setBalance((b) => b + wager * (1 + blackjackPayout));
       setMessage(blackjackPayout === 1.5 ? "Blackjack! You win 3:2." : "You win!");
     } else if (winner === "push") {
-      setBalance((b) => b + wager);
       setMessage("Push.");
     } else {
       setMessage("Dealer wins.");
     }
 
-    // on-chain settlement (best-effort)
     if (!connected) return;
 
     try {
       setSettling(true);
       if (winner === "dealer") {
         if (!HOUSE_ADDRESS) throw new Error("House address not set");
-        // player → house (wager)
         await send({ destination: HOUSE_ADDRESS, amount: wager });
       } else if (winner === "player") {
         if (!address) throw new Error("No player address");
-        // house → player (net winnings)
         const netWin = blackjackPayout === 1.5 ? wager * 1.5 : wager;
         await housePayout({ to: address, amount: netWin });
       }
-      // push → no transfer
     } catch (e) {
       console.error("[settlement] error", e);
       setMessage((m) => `${m}\n(Settlement error: see console)`);
     } finally {
       setSettling(false);
+      // refresh wallet after settlement so the page shows the true on-chain balance
+      const fresh = await fetchWalletBalance();
+      setBalance(fresh);
     }
   }
 
@@ -328,12 +330,9 @@ function canDouble() {
     setPhase("idle");
     setOutcome(null);
     setMessage("");
-    setPlayer([]);
-    playerRef.current = [];
-    setDealer([]);
-    dealerRef.current = [];
-    setDealerHole(null);
-    dealerHoleRef.current = null;
+    setPlayer([]); playerRef.current = [];
+    setDealer([]); dealerRef.current = [];
+    setDealerHole(null); dealerHoleRef.current = null;
     setDoubled(false);
   }
 
@@ -378,6 +377,7 @@ function canDouble() {
             </div>
             <div className="px-3 py-1 rounded-md bg-white/5 border border-white/10">
               Bet: <span className="font-semibold">{bet.toFixed(2)} KTA</span>
+              {doubled && <span className="ml-2 text-xs text-brand-200">Doubled</span>}
             </div>
           </div>
         </div>
@@ -420,13 +420,13 @@ function canDouble() {
               <button
                 className={`btn transition-colors ${canDeal ? "btn-brand hover:opacity-90" : "bg-white/10 text-zinc-500 cursor-not-allowed"}`}
                 onClick={startRound}
-                disabled={!canDeal || bet <= 0 || balance < 0}
+                disabled={!canDeal || bet <= 0 || balance < bet}
               >
                 Deal
               </button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>Hit</button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>Stand</button>
-             <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
+              <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>New Round</button>
             </div>
 
