@@ -21,6 +21,7 @@ function buildShoe(numDecks = 6): Card[] {
   for (let d = 0; d < numDecks; d++) {
     for (const s of SUITS) for (const r of RANKS) cards.push({ rank: r, suit: s, id: `${d}-${r}${s}-${uid++}` });
   }
+  // Fisher–Yates shuffle
   for (let i = cards.length - 1; i > 0; i--) {
     const j = (Math.random() * (i + 1)) | 0;
     [cards[i], cards[j]] = [cards[j], cards[i]];
@@ -43,6 +44,7 @@ function handValue(hand: Card[]) {
     if (c.rank === "A") { aces++; total += 11; } else total += cardValue(c.rank);
   }
   while (total > 21 && aces > 0) { total -= 10; aces--; }
+  // "soft" if there's at least one Ace currently counted as 11
   const soft = hand.some((c) => c.rank === "A") && total <= 21 && aces > 0;
   return { total, soft };
 }
@@ -97,6 +99,17 @@ export default function BlackjackPage() {
   // guards
   const dealerPlayedRef = useRef(false);
 
+  // ---- NEW: live refs to avoid stale-closure bugs (esp. after Double) ----
+  const playerRef = useRef<Card[]>(player);
+  const dealerRef = useRef<Card[]>(dealer);
+  const dealerHoleRef = useRef<Card | null>(dealerHole);
+  const shoeRef = useRef<Card[]>(shoe);
+
+  useEffect(() => { playerRef.current = player; }, [player]);
+  useEffect(() => { dealerRef.current = dealer; }, [dealer]);
+  useEffect(() => { dealerHoleRef.current = dealerHole; }, [dealerHole]);
+  useEffect(() => { shoeRef.current = shoe; }, [shoe]);
+
   // wallet sync
   const { connected, address, getBalance, send, housePayout } = useKeeta();
   useEffect(() => {
@@ -124,14 +137,16 @@ export default function BlackjackPage() {
     if (deck.length <= cutIndex) {
       const fresh = buildShoe(6);
       setCutIndex(Math.floor(fresh.length * 0.2));
+      shoeRef.current = fresh; // keep ref hot
       return fresh;
     }
     return deck;
   }
   function draw1(): [Card, Card[]] {
-    let deck = reshuffleIfNeeded(shoe);
+    let deck = reshuffleIfNeeded(shoeRef.current);
     const [cards, rest] = drawN(1, deck);
     setShoe(rest);
+    shoeRef.current = rest; // keep ref hot
     return [cards[0], rest];
   }
 
@@ -150,7 +165,7 @@ export default function BlackjackPage() {
     setWager(bet);
     setBalance((b) => b - bet);
 
-    let deck = reshuffleIfNeeded(shoe);
+    let deck = reshuffleIfNeeded(shoeRef.current);
     let draw = (n: number) => { const [cards, rest] = drawN(n, deck); deck = rest; return cards; };
 
     const [p1] = draw(1);
@@ -159,16 +174,21 @@ export default function BlackjackPage() {
     const [dHole] = draw(1);
 
     setShoe(deck);
+    shoeRef.current = deck;
+
     setPlayer([p1, p2]);
     setDealer([dUp]);
     setDealerHole(dHole);
+    dealerHoleRef.current = dHole;
     setPhase("player");
 
     const pBJ = isBlackjack([p1, p2]);
     const dBJ = isBlackjack([dUp, dHole]);
     if (pBJ || dBJ) {
       setDealer([dUp, dHole]);
+      dealerRef.current = [dUp, dHole];
       setDealerHole(null);
+      dealerHoleRef.current = null;
       if (pBJ && dBJ) finishRound("push");
       else if (pBJ) finishRound("player", 1.5);
       else finishRound("dealer");
@@ -178,18 +198,25 @@ export default function BlackjackPage() {
   function hit() {
     if (phase !== "player") return;
     const [c] = draw1();
-    const next = [...player, c];
+    const next = [...playerRef.current, c];
     setPlayer(next);
+    playerRef.current = next;
     if (handValue(next).total > 21) finishRound("dealer");
   }
+
   function stand() {
     if (phase !== "player") return;
     setPhase("dealer");
     dealerRevealAndPlay();
   }
-  function canDouble() {
-    return phase === "player" && player.length === 2 && !doubled && bet <= balance;
-  }
+
+  // safer double guard for floats
+function canDouble() {
+  const EPS = 1e-9;
+  return phase === "player" && player.length === 2 && !doubled && (balance + EPS) >= bet;
+}
+
+
   function doubleDown() {
     if (!canDouble()) return;
     setBalance((b) => b - bet);
@@ -197,44 +224,66 @@ export default function BlackjackPage() {
     setDoubled(true);
 
     const [c] = draw1();
-    const next = [...player, c];
+    const next = [...playerRef.current, c];
     setPlayer(next);
-    if (handValue(next).total > 21) finishRound("dealer");
-    else { setPhase("dealer"); dealerRevealAndPlay(); }
+    playerRef.current = next;
+
+    if (handValue(next).total > 21) {
+      finishRound("dealer");              // bust after double
+    } else {
+      setPhase("dealer");
+      dealerRevealAndPlay(true);
+    }
   }
 
-  function dealerRevealAndPlay() {
+  function dealerRevealAndPlay(immediate=false) {
     if (dealerPlayedRef.current) return;
     dealerPlayedRef.current = true;
 
-    setDealer((cur) => (dealerHole ? [...cur, dealerHole] : cur));
-    setDealerHole(null);
+    // reveal hole from live ref
+    const hole = dealerHoleRef.current;
+    if (hole) {
+      const revealed = [...dealerRef.current, hole];
+      setDealer(revealed);
+      dealerRef.current = revealed;
+      setDealerHole(null);
+      dealerHoleRef.current = null;
+    }
 
-    setTimeout(() => {
-      let deck = shoe.slice();
-      let d = dealerHole ? [...dealer, dealerHole] : dealer.slice();
+    const run = () => {
+      let deck = shoeRef.current.slice();
+      let d = dealerRef.current.slice();
+
       const standOnSoft17 = true;
       while (true) {
         const { total, soft } = handValue(d);
-        if (total > 21) break;
         if (total > 17) break;
-        if (total === 17 && standOnSoft17) break;
+        if (total === 17) {
+          if (soft && standOnSoft17) break; // stand soft-17
+          if (!soft) break;                  // stand hard-17
+        }
         deck = reshuffleIfNeeded(deck);
         const [take, rest] = drawN(1, deck);
         d = [...d, take[0]];
         deck = rest;
       }
-      setShoe(deck);
-      setDealer(d);
 
-      const p = handValue(player).total;
+      // commit end state
+      setShoe(deck);           shoeRef.current = deck;
+      setDealer(d);            dealerRef.current = d;
+
+      const p = handValue(playerRef.current).total;
       const dv = handValue(d).total;
       if (dv > 21) finishRound("player");
       else if (p > dv) finishRound("player");
       else if (p < dv) finishRound("dealer");
       else finishRound("push");
-    }, 200);
-  }
+    };
+
+    // keep the tiny delay for normal play if you like the animation feel
+    if (immediate) run();
+    else setTimeout(run, 200);
+}
 
   async function finishRound(winner: Outcome, blackjackPayout = 1) {
     setPhase("over");
@@ -269,7 +318,7 @@ export default function BlackjackPage() {
       // push → no transfer
     } catch (e) {
       console.error("[settlement] error", e);
-      setMessage((m) => m + "  (Settlement error: see console)");
+      setMessage((m) => `${m}\n(Settlement error: see console)`);
     } finally {
       setSettling(false);
     }
@@ -280,8 +329,11 @@ export default function BlackjackPage() {
     setOutcome(null);
     setMessage("");
     setPlayer([]);
+    playerRef.current = [];
     setDealer([]);
+    dealerRef.current = [];
     setDealerHole(null);
+    dealerHoleRef.current = null;
     setDoubled(false);
   }
 
@@ -374,12 +426,12 @@ export default function BlackjackPage() {
               </button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>Hit</button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>Stand</button>
-              <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
+             <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>New Round</button>
             </div>
 
             {message && (
-              <div className="mt-4 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">
+              <div className="mt-4 whitespace-pre-line rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">
                 {message}
                 {settling && <span className="ml-2 text-xs text-white/60">Settling…</span>}
               </div>
