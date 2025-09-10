@@ -21,7 +21,6 @@ function buildShoe(numDecks = 6): Card[] {
   for (let d = 0; d < numDecks; d++) {
     for (const s of SUITS) for (const r of RANKS) cards.push({ rank: r, suit: s, id: `${d}-${r}${s}-${uid++}` });
   }
-  // Fisher–Yates
   for (let i = cards.length - 1; i > 0; i--) {
     const j = (Math.random() * (i + 1)) | 0;
     [cards[i], cards[j]] = [cards[j], cards[i]];
@@ -44,7 +43,6 @@ function handValue(hand: Card[]) {
     if (c.rank === "A") { aces++; total += 11; } else total += cardValue(c.rank);
   }
   while (total > 21 && aces > 0) { total -= 10; aces--; }
-  // soft if at least one Ace still counted as 11 (i.e., we had >0 aces before reducing)
   const soft = hand.some((c) => c.rank === "A") && total <= 21 && aces > 0;
   return { total, soft };
 }
@@ -52,7 +50,7 @@ function isBlackjack(hand: Card[]) {
   return hand.length === 2 && handValue(hand).total === 21;
 }
 
-/* ---------- Balance helpers ---------- */
+/* ---------- Token / House ---------- */
 const BASE_TOKEN_ID = "keeta_anyiff4v34alvumupagmdyosydeq24lc4def5mrpmmyhx3j6vj2uucckeqn52";
 const HOUSE_ADDRESS = process.env.NEXT_PUBLIC_HOUSE_ADDRESS || "";
 
@@ -92,17 +90,20 @@ export default function BlackjackPage() {
   const [wager, setWager] = useState(0.25);
   const [doubled, setDoubled] = useState(false);
 
-  // wallet balance shown on page
+  // wallet (page display)
   const [balance, setBalance] = useState(0);
 
-  // derived
+  // funding gates
+  const [isFunding, setIsFunding] = useState<false | "BET_1X" | "DOUBLE_1X">(false);
+
+  // derived scores
   const playerScore = useMemo(() => handValue(player), [player]);
   const dealerScore = useMemo(() => handValue(dealer), [dealer]);
 
   // guards
   const dealerPlayedRef = useRef(false);
 
-  // live refs to avoid stale-state bugs (esp. after Double)
+  // live refs
   const playerRef = useRef<Card[]>(player);
   const dealerRef = useRef<Card[]>(dealer);
   const dealerHoleRef = useRef<Card | null>(dealerHole);
@@ -115,7 +116,7 @@ export default function BlackjackPage() {
   // wallet API
   const { connected, address, getBalance, send, housePayout } = useKeeta();
 
-  // seed balance when connected
+  // seed balance on connect
   useEffect(() => {
     if (!connected) return;
     let stop = false;
@@ -138,6 +139,17 @@ export default function BlackjackPage() {
     return 0;
   }
 
+  async function escrow(amount: number, kind: "BET_1X" | "DOUBLE_1X") {
+    if (!HOUSE_ADDRESS) throw new Error("House address not set");
+    setIsFunding(kind);
+    setMessage(kind === "BET_1X" ? `Funding ${amount.toFixed(2)} KTA…` : `Funding double ${amount.toFixed(2)} KTA…`);
+    await send({ destination: HOUSE_ADDRESS, amount });  // waits until wallet approves/tx submitted
+    const fresh = await fetchWalletBalance();            // reflect escrowed funds
+    setBalance(fresh);
+    setIsFunding(false);
+    setMessage("");
+  }
+
   /* ----- helpers ----- */
   function reshuffleIfNeeded(deck: Card[]) {
     if (deck.length <= cutIndex) {
@@ -156,15 +168,25 @@ export default function BlackjackPage() {
     return [cards[0], rest];
   }
 
-  // ---- Round flow ----
+  /* ----- Round flow ----- */
+
+  // REQUIRE: escrow 1x BEFORE any cards are dealt.
   async function startRound() {
     if (!(phase === "idle" || phase === "over")) return;
 
-    // refresh wallet at round start so page shows the real live balance
+    // refresh live wallet, verify funds
     const bank = await fetchWalletBalance();
     setBalance(bank);
-
     if (bet > bank) { setMessage("Insufficient balance for this bet."); return; }
+
+    // escrow 1x bet and wait until wallet approves/submits
+    try {
+      await escrow(bet, "BET_1X");
+    } catch (e: any) {
+      setIsFunding(false);
+      setMessage(e?.message || "Funding failed/cancelled.");
+      return;
+    }
 
     dealerPlayedRef.current = false;
     setOutcome(null);
@@ -173,7 +195,6 @@ export default function BlackjackPage() {
     setDealer([]);
     setDealerHole(null);
     setDoubled(false);
-
     setWager(bet);
 
     let deck = reshuffleIfNeeded(shoeRef.current);
@@ -201,13 +222,13 @@ export default function BlackjackPage() {
       setDealerHole(null);
       dealerHoleRef.current = null;
       if (pBJ && dBJ) finishRound("push");
-      else if (pBJ) finishRound("player", 1.5);
+      else if (pBJ) finishRound("player", 1.5); // 3:2
       else finishRound("dealer");
     }
   }
 
   function hit() {
-    if (phase !== "player") return;
+    if (phase !== "player" || isFunding) return;
     const [c] = draw1();
     const next = [...playerRef.current, c];
     setPlayer(next);
@@ -216,19 +237,33 @@ export default function BlackjackPage() {
   }
 
   function stand() {
-    if (phase !== "player") return;
+    if (phase !== "player" || isFunding) return;
     setPhase("dealer");
-    dealerRevealAndPlay(true); // sync for snappy finish
+    dealerRevealAndPlay(true);
   }
 
-  // Double guard: only two cards, haven't doubled, enough balance to cover full doubled wager (2 * bet)
+  // After 1x escrowed, require ANOTHER 1x escrow before the Double draw.
   function canDouble() {
     const EPS = 1e-9;
-    return phase === "player" && player.length === 2 && !doubled && (balance + EPS) >= (bet * 2);
+    return phase === "player"
+      && !isFunding
+      && player.length === 2
+      && !doubled
+      && (balance + EPS) >= bet; // need a second 1x available
   }
 
-  function doubleDown() {
+  async function doubleDown() {
     if (!canDouble()) return;
+
+    // escrow the additional 1x for double BEFORE drawing
+    try {
+      await escrow(bet, "DOUBLE_1X");
+    } catch (e: any) {
+      setIsFunding(false);
+      setMessage(e?.message || "Double funding failed/cancelled.");
+      return;
+    }
+
     setWager((w) => w + bet);
     setDoubled(true);
 
@@ -267,8 +302,8 @@ export default function BlackjackPage() {
         const { total, soft } = handValue(d);
         if (total > 17) break;
         if (total === 17) {
-          if (soft && standOnSoft17) break; // stand on soft 17
-          if (!soft) break;                  // stand on hard 17
+          if (soft && standOnSoft17) break;
+          if (!soft) break;
         }
         deck = reshuffleIfNeeded(deck);
         const [take, rest] = drawN(1, deck);
@@ -291,6 +326,10 @@ export default function BlackjackPage() {
     else setTimeout(run, 200);
   }
 
+  // With escrow model:
+  // - Dealer win: house keeps escrowed stake(s) -> NO player->house send here.
+  // - Player win: house pays back stake(s) + winnings.
+  // - Push: house refunds stake(s).
   async function finishRound(winner: Outcome, blackjackPayout = 1) {
     setPhase("over");
     setOutcome(winner);
@@ -304,23 +343,30 @@ export default function BlackjackPage() {
     }
 
     if (!connected) return;
+    const usedStake = bet * (doubled ? 2 : 1);
 
     try {
       setSettling(true);
-      if (winner === "dealer") {
-        if (!HOUSE_ADDRESS) throw new Error("House address not set");
-        await send({ destination: HOUSE_ADDRESS, amount: wager });
-      } else if (winner === "player") {
+
+      if (winner === "player") {
+        // Regular win pays 2x used stake; blackjack pays 2.5x base bet (BJ can't happen after double).
+        const payout = doubled
+          ? 2 * usedStake                           // 4x bet total back (refund 2x + win 2x)
+          : (blackjackPayout === 1.5 ? 2.5 * bet : 2 * bet);
         if (!address) throw new Error("No player address");
-        const netWin = blackjackPayout === 1.5 ? wager * 1.5 : wager;
-        await housePayout({ to: address, amount: netWin });
+        await housePayout({ to: address, amount: payout });
+      } else if (winner === "push") {
+        // Refund escrowed stake(s)
+        if (!address) throw new Error("No player address");
+        await housePayout({ to: address, amount: usedStake });
       }
+      // Dealer win → house keeps escrow; nothing to send.
     } catch (e) {
       console.error("[settlement] error", e);
       setMessage((m) => `${m}\n(Settlement error: see console)`);
     } finally {
       setSettling(false);
-      // refresh wallet after settlement so the page shows the true on-chain balance
+      // Refresh wallet to reflect post-settlement reality
       const fresh = await fetchWalletBalance();
       setBalance(fresh);
     }
@@ -363,8 +409,8 @@ export default function BlackjackPage() {
     );
   }
 
-  const canDeal = phase === "idle" || phase === "over";
-  const canAct = phase === "player";
+  const canDeal = (phase === "idle" || phase === "over") && !isFunding;
+  const canAct = phase === "player" && !isFunding;
 
   return (
     <section className="space-y-6">
@@ -422,11 +468,17 @@ export default function BlackjackPage() {
                 onClick={startRound}
                 disabled={!canDeal || bet <= 0 || balance < bet}
               >
-                Deal
+                {isFunding === "BET_1X" ? "Funding…" : "Deal"}
               </button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>Hit</button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>Stand</button>
-              <button className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50" onClick={doubleDown} disabled={!canDouble()}>Double</button>
+              <button
+                className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50"
+                onClick={doubleDown}
+                disabled={!canDouble()}
+              >
+                {isFunding === "DOUBLE_1X" ? "Funding…" : "Double"}
+              </button>
               <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>New Round</button>
             </div>
 
@@ -454,12 +506,12 @@ export default function BlackjackPage() {
                   </button>
                 ))}
               </div>
-              {!canDeal && <div className="mt-2 text-xs text-[--color-muted]">Bet locked. Finish the round to change it.</div>}
+              {!canDeal && <div className="mt-2 text-xs text-[--color-muted]">Bet locked. Finish or cancel the round to change it.</div>}
             </div>
 
             <div className="text-xs text-[--color-muted]">
               <div>Rules: 3:2 blackjack, dealer stands on soft 17, no splits (yet).</div>
-              <div className="mt-1">This is a demo: no web3 or real wagers.</div>
+              <div className="mt-1">Escrow required before deal and before Double.</div>
             </div>
           </aside>
         </div>
