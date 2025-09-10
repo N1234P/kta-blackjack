@@ -1,14 +1,17 @@
-// next.config.ts
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  eslint: {
-    // ✅ let the build succeed even if ESLint finds problems
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    // ✅ let the build succeed even if there are TS errors
-    ignoreBuildErrors: true,
+  // keep the build from failing on lint/TS while deploying
+  eslint: { ignoreDuringBuilds: true },
+  typescript: { ignoreBuildErrors: true },
+
+  // 🔑 Force-include the Keeta SDK for the keeta API route
+  outputFileTracingIncludes: {
+    // path is the route file without the extension
+    "/src/app/api/keeta/route": [
+      "node_modules/@keetanetwork/keetanet-client/**",
+      ".pnpm/**/node_modules/@keetanetwork/keetanet-client/**"
+    ],
   },
 };
 
