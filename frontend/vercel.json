@@ -3,7 +3,8 @@
   "buildCommand": "pnpm build",
   "outputDirectory": ".next",
   "functions": {
-    "app/**": {
+    "src/app/api/**": {
+      "externalNodeModules": ["@keetanetwork/keetanet-client"],
       "includeFiles": "node_modules/@keetanetwork/keetanet-client/**"
     }
   }
