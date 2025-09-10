@@ -1,10 +1,10 @@
 {
   "framework": "nextjs",
-  "buildCommand": "pnpm build",
-  "outputDirectory": ".next",
+  "buildCommand": "cd frontend && pnpm build",
+  "outputDirectory": "frontend/.next",
   "functions": {
-    "src/app/api/**": {
-      "includeFiles": "node_modules/@keetanetwork/keetanet-client/**"
+    "frontend/src/app/api/**": {
+      "includeFiles": "frontend/node_modules/@keetanetwork/keetanet-client/**"
     }
   }
 }
