@@ -1,5 +1,6 @@
 "use client";
 
+import type { PropsWithChildren } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeeta } from "../../keeta/KeetaContext";
 
@@ -94,7 +95,8 @@ export default function BlackjackPage() {
   const [balance, setBalance] = useState(0);
 
   // funding gates
-  const [isFunding, setIsFunding] = useState<false | "BET_1X" | "DOUBLE_1X">(false);
+  type FundingState = false | "BET_1X" | "DOUBLE_1X";
+  const [isFunding, setIsFunding] = useState<FundingState>(false);
 
   // derived scores
   const playerScore = useMemo(() => handValue(player), [player]);
@@ -170,7 +172,6 @@ export default function BlackjackPage() {
 
   /* ----- Round flow ----- */
 
-  // REQUIRE: escrow 1x BEFORE any cards are dealt.
   async function startRound() {
     if (!(phase === "idle" || phase === "over")) return;
 
@@ -255,7 +256,6 @@ export default function BlackjackPage() {
   async function doubleDown() {
     if (!canDouble()) return;
 
-    // escrow the additional 1x for double BEFORE drawing
     try {
       await escrow(bet, "DOUBLE_1X");
     } catch (e: any) {
@@ -382,136 +382,244 @@ export default function BlackjackPage() {
     setDoubled(false);
   }
 
-  /* ----- UI helpers ----- */
+  /* ----- UI helpers (typed) ----- */
+  type BadgeTone = "default" | "brand" | "danger" | "muted";
+  function Badge({ children, tone = "default" }: PropsWithChildren<{ tone?: BadgeTone }>) {
+    const tones: Record<BadgeTone, string> = {
+      default: "bg-white/5 border-white/10 text-white/90",
+      brand: "bg-emerald-500/15 border-emerald-400/30 text-emerald-200",
+      danger: "bg-red-500/10 border-red-400/30 text-red-200",
+      muted: "bg-white/5 border-white/10 text-white/60",
+    };
+    return (
+      <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium tracking-wide ${tones[tone]} shadow-sm`}>
+        {children}
+      </span>
+    );
+  }
+
   function Score({ total, soft }: { total: number; soft: boolean }) {
     return (
-      <div className="text-sm">
-        Score: <span className="font-semibold">{total}</span>
-        {soft && <span className="ml-1 text-[--color-muted]">(soft)</span>}
+      <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs">
+        <span className="opacity-70">Score</span>
+        <span className="font-semibold text-white">{total}</span>
+        {soft && <span className="px-1.5 rounded bg-white/10 text-[10px] tracking-wide">SOFT</span>}
       </div>
     );
   }
+
   function CardView({ c, hidden = false }: { c: Card; hidden?: boolean }) {
     const isRed = c.suit === "♥" || c.suit === "♦";
     if (hidden) {
       return (
-        <div className="w-11 h-16 sm:w-12 sm:h-16 rounded-lg bg-[--color-border] border border-white/10 grid place-items-center">
-          <span className="text-xs text-[--color-muted]">🂠</span>
+        <div className="w-12 h-16 sm:w-[3.25rem] sm:h-[4.5rem] rounded-xl bg-gradient-to-br from-zinc-700 to-zinc-600 border border-white/10 shadow-[0_8px_24px_rgba(0,0,0,0.35)] grid place-items-center">
+          <span className="text-xs text-white/70">🂠</span>
         </div>
       );
     }
     return (
-      <div className="w-11 h-16 sm:w-12 sm:h-16 rounded-lg bg-white text-black border border-black/10 shadow grid place-items-center">
-        <div className={`text-sm font-bold ${isRed ? "text-red-600" : "text-black"}`}>
+      <div className="w-12 h-16 sm:w-[3.25rem] sm:h-[4.5rem] rounded-xl bg-white text-black border border-zinc-300 shadow-[0_8px_24px_rgba(0,0,0,0.25)] grid place-items-center">
+        <div className={`text-sm sm:text-base font-extrabold tracking-tight ${isRed ? "text-red-600" : "text-zinc-900"}`}>
           {c.rank}<span className="ml-0.5">{c.suit}</span>
         </div>
       </div>
     );
   }
 
-  const canDeal = (phase === "idle" || phase === "over") && !isFunding;
-  const canAct = phase === "player" && !isFunding;
+  // strictly-boolean UI guards (fixes TS2322 on disabled)
+  const isBusy: boolean = isFunding !== false;
+  const canDeal: boolean = (phase === "idle" || phase === "over") && !isBusy;
+  const canAct: boolean = phase === "player" && !isBusy;
 
+  /* ---------- UI ---------- */
   return (
-    <section className="space-y-6">
-      <div className="card p-5">
-        <div className="flex items-center justify-between gap-4">
-          <h1 className="text-2xl font-semibold">Blackjack</h1>
-          <div className="flex items-center gap-3 text-sm">
-            <div className="px-3 py-1 rounded-md bg-white/5 border border-white/10">
-              Balance: <span className="font-semibold">{balance.toFixed(2)} KTA</span>
+    <section
+      className="min-h-[calc(100vh-6rem)] w-full"
+      style={{
+        background:
+          "radial-gradient(1200px 600px at 50% -10%, rgba(16,185,129,0.25), rgba(2,6,23,0))," +
+          "radial-gradient(800px 400px at 100% 0%, rgba(16,185,129,0.12), rgba(2,6,23,0))",
+      }}
+    >
+      <div className="mx-auto max-w-6xl px-4 py-6">
+        {/* Top Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="rounded-2xl bg-emerald-500/10 border border-emerald-400/20 px-3 py-1.5">
+              <span className="text-emerald-200 text-xs tracking-wider">TABLE</span>
             </div>
-            <div className="px-3 py-1 rounded-md bg-white/5 border border-white/10">
-              Bet: <span className="font-semibold">{bet.toFixed(2)} KTA</span>
-              {doubled && <span className="ml-2 text-xs text-brand-200">Doubled</span>}
-            </div>
+            <h1 className="text-3xl font-semibold tracking-tight">Blackjack</h1>
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge tone="brand">Balance: <span className="font-semibold ml-1">{balance.toFixed(2)} KTA</span></Badge>
+            <Badge>Bet: <span className="font-semibold ml-1">{bet.toFixed(2)} KTA</span>{doubled && <span className="ml-2 rounded bg-emerald-500/15 px-1.5">Doubled</span>}</Badge>
           </div>
         </div>
 
-        {/* table + sidebar */}
-        <div className="mt-5 grid gap-4 md:grid-cols-[1fr,320px]">
-          <div className="card p-4 min-w-0">
-            {/* Dealer */}
+        {/* Table & Sidebar */}
+        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+          {/* Felt table */}
+          <div
+            className="relative overflow-hidden rounded-3xl border border-emerald-400/10 bg-gradient-to-b from-emerald-950/60 to-emerald-900/30 p-5"
+          >
+            {/* subtle rim light */}
+            <div className="pointer-events-none absolute inset-0 rounded-3xl ring-1 ring-white/5" />
+            {/* Dealer Row */}
             <div className="flex items-center justify-between">
-              <div className="text-sm text-[--color-muted]">Dealer</div>
-              {phase === "player" ? (
-                <div className="text-sm">Score: <span className="font-semibold">?</span></div>
-              ) : (
-                <Score total={dealerScore.total} soft={dealerScore.soft} />
+              <div className="flex items-center gap-2">
+                <Badge tone="muted">Dealer</Badge>
+                {phase === "player" ? (
+                  <span className="text-xs text-white/60">Score: <span className="font-semibold text-white">?</span></span>
+                ) : (
+                  <Score total={dealerScore.total} soft={dealerScore.soft} />
+                )}
+              </div>
+              {phase === "player" && (
+                <div className="text-[11px] uppercase tracking-wider text-white/60">
+                  Dealer shows
+                </div>
               )}
             </div>
 
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-3 flex flex-wrap gap-2 min-h-[4.5rem]">
               {dealer.length === 0 && !dealerHole && (
-                <div className="h-16 grid place-items-center text-[--color-muted]">—</div>
+                <div className="h-[4.5rem] grid place-items-center text-white/40 text-sm">—</div>
               )}
               {dealer.map((c) => (<CardView key={c.id} c={c} />))}
               {phase === "player" && dealerHole && (<CardView key={dealerHole.id} c={dealerHole} hidden />)}
             </div>
 
-            {/* Player */}
-            <div className="flex items-center justify-between mt-6">
-              <div className="text-sm text-[--color-muted]">You</div>
-              <Score total={playerScore.total} soft={playerScore.soft} />
+            {/* Divider arc */}
+            <div className="my-6 h-px w-full bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+
+            {/* Player Row */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Badge tone="muted">You</Badge>
+                <Score total={playerScore.total} soft={playerScore.soft} />
+              </div>
+              <div className="text-xs text-white/60">
+                Wager: <span className="text-white font-semibold">{wager.toFixed(2)} KTA</span>
+              </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
+
+            <div className="mt-3 flex flex-wrap gap-2 min-h-[4.5rem]">
               {player.length === 0 && (
-                <div className="h-16 grid place-items-center text-[--color-muted]">—</div>
+                <div className="h-[4.5rem] grid place-items-center text-white/40 text-sm">—</div>
               )}
               {player.map((c) => (<CardView key={c.id} c={c} />))}
             </div>
 
-            {/* Actions */}
-            <div className="mt-6 flex flex-wrap gap-2">
-              <button
-                className={`btn transition-colors ${canDeal ? "btn-brand hover:opacity-90" : "bg-white/10 text-zinc-500 cursor-not-allowed"}`}
-                onClick={startRound}
-                disabled={!canDeal || bet <= 0 || balance < bet}
-              >
-                {isFunding === "BET_1X" ? "Funding…" : "Deal"}
-              </button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={hit} disabled={!canAct}>Hit</button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={stand} disabled={!canAct}>Stand</button>
-              <button
-                className="btn bg-white/10 hover:bg-brand/60 disabled:opacity-50"
-                onClick={doubleDown}
-                disabled={!canDouble()}
-              >
-                {isFunding === "DOUBLE_1X" ? "Funding…" : "Double"}
-              </button>
-              <button className="btn bg-white/10 hover:bg-brand/60" onClick={newRound} disabled={phase !== "over"}>New Round</button>
-            </div>
+            {/* Action Bar */}
+            <div className="mt-6">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                <button
+                  className={`relative overflow-hidden rounded-xl px-4 py-3 text-sm font-semibold tracking-wide backdrop-blur
+                    shadow-[0_8px_20px_rgba(0,0,0,0.25)]
+                    ${canDeal ? "bg-emerald-500 hover:bg-emerald-400 text-emerald-950" : "bg-white/5 text-white/40 cursor-not-allowed"}`}
+                  onClick={startRound}
+                  disabled={!canDeal || bet <= 0 || balance < bet}
+                >
+                  {isFunding === "BET_1X" ? "Funding…" : "Deal"}
+                </button>
 
-            {message && (
-              <div className="mt-4 whitespace-pre-line rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm">
-                {message}
-                {settling && <span className="ml-2 text-xs text-white/60">Settling…</span>}
+                <button
+                  className={`rounded-xl px-4 py-3 text-sm font-semibold tracking-wide backdrop-blur
+                    shadow-[0_8px_20px_rgba(0,0,0,0.25)]
+                    ${canAct ? "bg-white/10 hover:bg-white/15 text-white" : "bg-white/5 text-white/40"}`}
+                  onClick={hit}
+                  disabled={!canAct}
+                >
+                  Hit
+                </button>
+
+                <button
+                  className={`rounded-xl px-4 py-3 text-sm font-semibold tracking-wide backdrop-blur
+                    shadow-[0_8px_20px_rgba(0,0,0,0.25)]
+                    ${canAct ? "bg-white/10 hover:bg-white/15 text-white" : "bg-white/5 text-white/40"}`}
+                  onClick={stand}
+                  disabled={!canAct}
+                >
+                  Stand
+                </button>
+
+                <button
+                  className={`rounded-xl px-4 py-3 text-sm font-semibold tracking-wide backdrop-blur
+                    shadow-[0_8px_20px_rgba(0,0,0,0.25)]
+                    ${canDouble() ? "bg-white/10 hover:bg-white/15 text-white" : "bg-white/5 text-white/40"}`}
+                  onClick={doubleDown}
+                  disabled={!canDouble()}
+                >
+                  {isFunding === "DOUBLE_1X" ? "Funding…" : "Double"}
+                </button>
+
+                <button
+                  className={`rounded-xl px-4 py-3 text-sm font-semibold tracking-wide backdrop-blur
+                    shadow-[0_8px_20px_rgba(0,0,0,0.25)]
+                    ${phase === "over" ? "bg-zinc-700/50 hover:bg-zinc-600/50 text-white" : "bg-white/5 text-white/40"}`}
+                  onClick={newRound}
+                  disabled={phase !== "over"}
+                >
+                  New Round
+                </button>
               </div>
-            )}
+
+              {message && (
+                <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white/90 whitespace-pre-line">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-400/80" />
+                    <span>{message}</span>
+                    {settling && <span className="ml-2 text-xs text-white/60">Settling…</span>}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Sidebar */}
-          <aside className="card p-4 space-y-4 min-w-0">
-            <div>
-              <div className="text-sm font-medium">Bet Size</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {[0.1, 0.25, 0.5, 1].map((b) => (
-                  <button
-                    key={b}
-                    className={`btn text-sm ${bet === b ? "btn-brand hover:opacity-90" : "bg-white/10 hover:bg-brand/60"}`}
-                    onClick={() => setBet(b)}
-                    disabled={!canDeal}
-                  >
-                    {b} KTA
-                  </button>
-                ))}
+          <aside className="rounded-3xl border border-white/10 bg-white/[0.03] p-4 lg:p-5 backdrop-blur-sm">
+            <div className="space-y-4">
+              <div>
+                <div className="text-sm font-semibold tracking-wide text-white/80">Bet Size</div>
+                <div className="mt-3 grid grid-cols-4 gap-2">
+                  {[0.1, 0.25, 0.5, 1].map((b) => (
+                    <button
+                      key={b}
+                      className={`relative overflow-hidden rounded-xl px-3 py-2 text-sm font-semibold tracking-wide
+                        ${bet === b
+                          ? "bg-emerald-500 text-emerald-950 shadow-[0_10px_24px_rgba(16,185,129,0.35)]"
+                          : "bg-white/10 hover:bg-white/15 text-white/90 border border-white/10"}`}
+                      onClick={() => setBet(b)}
+                      disabled={!((phase === "idle" || phase === "over") && !isBusy)}
+                    >
+                      {b} KTA
+                    </button>
+                  ))}
+                </div>
+                {!(phase === "idle" || phase === "over") && (
+                  <div className="mt-2 text-xs text-white/50">Bet locked. Finish or cancel the round to change it.</div>
+                )}
               </div>
-              {!canDeal && <div className="mt-2 text-xs text-[--color-muted]">Bet locked. Finish or cancel the round to change it.</div>}
-            </div>
 
-            <div className="text-xs text-[--color-muted]">
-              <div>Rules: 3:2 blackjack, dealer stands on soft 17, no splits (yet).</div>
-              <div className="mt-1">Escrow required before deal and before Double.</div>
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="text-xs text-white/70 leading-relaxed">
+                  <div>Rules: <span className="text-white">3:2 blackjack</span>, dealer stands on <span className="text-white">soft 17</span>, no splits (yet).</div>
+                  <div className="mt-1">Escrow required before deal and before Double.</div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 p-4 bg-gradient-to-br from-white/[0.04] to-transparent">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-white/70">Cut card penetration</span>
+                  <span className="text-xs text-white/90">{Math.round((1 - cutIndex / (6 * 52)) * 100)}%</span>
+                </div>
+                <div className="mt-2 h-1.5 w-full rounded-full bg-white/10">
+                  <div
+                    className="h-1.5 rounded-full bg-emerald-400/80"
+                    style={{ width: `${Math.min(100, Math.max(0, Math.round((1 - cutIndex / (6 * 52)) * 100)))}%` }}
+                  />
+                </div>
+              </div>
             </div>
           </aside>
         </div>
