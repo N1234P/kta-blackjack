@@ -87,7 +87,6 @@ export default function AccountPage() {
   async function handleSend() {
     await wrap(async () => {
       const res = await send({ destination, amount: Number(amount) });
-      setLastTx(res?.tx ?? res);
       setNote("Transaction submitted.");
     });
   }
